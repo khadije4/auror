@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AURORA · Gesture Particles</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            opacity: 0;
+            transition: opacity 1.2s ease;
+        }
+        body.loaded {
+            opacity: 1;
+        }
+        #vignette {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 60%, rgba(0,0,0,0.2) 120%);
+            z-index: 2;
+            pointer-events: none;
+        }
+        #webcam-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter: blur(6px) brightness(0.9);
+            z-index: -1;
+            transform: scale(1.02);
+        }
+        canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+        }
+        #info, #hand-status, #fullscreenBtn {
+            position: absolute;
+            z-index: 10;
+            color: rgba(255,255,255,0.9);
+            backdrop-filter: blur(12px) saturate(180%);
+            -webkit-backdrop-filter: blur(12px) saturate(180%);
+            background: rgba(20, 15, 40, 0.25);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 60px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.05) inset;
+            transition: transform 0.2s, box-shadow 0.3s;
+            animation: float 6s infinite ease-in-out;
+        }
+        #info {
+            top: 30px;
+            left: 30px;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        #info i {
+            margin-right: 10px;
+            color: #c0b0ff;
+        }
+        #hand-status {
+            bottom: 40px;
+            right: 40px;
+            padding: 12px 28px;
+            font-size: 18px;
+            font-weight: 500;
+            border: 1px solid rgba(255,255,255,0.25);
+            animation-delay: -2s;
+        }
+        #hand-status i {
+            margin-right: 10px;
+            color: #ffb3d9;
+        }
+        #fullscreenBtn {
+            bottom: 40px;
+            left: 40px;
+            width: 56px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            cursor: pointer;
+            background: rgba(30, 20, 50, 0.3);
+            border: 1px solid rgba(255,255,255,0.3);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            transition: all 0.25s;
+            animation: float 5s infinite ease-in-out;
+        }
+        #fullscreenBtn:hover {
+            transform: scale(1.15);
+            border-color: #ffffff;
+            box-shadow: 0 0 20px rgba(160, 130, 255, 0.6);
+            background: rgba(60, 40, 90, 0.5);
+        }
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-6px); }
+            100% { transform: translateY(0px); }
+        }
+    </style>
+</head>
+<body>
+    <div id="vignette"></div>
+    <video id="webcam-bg" autoplay playsinline muted></video>
+    
+    
+    <div id="hand-status">
+        <i class="fas fa-hand-sparkles"></i> <span id="gesture-text">awaiting hand...</span>
+    </div>
+    <div id="fullscreenBtn" title="Fullscreen">
+        <i class="fas fa-expand"></i>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        (function() {
+            window.addEventListener('load', () => document.body.classList.add('loaded'));
+
+            // --- CONFIGURATION ---
+            const PARTICLE_COUNT = 6000;        // balanced for performance
+            const BASE_SIZE = 0.12;
+            const MORPH_SPEED = 0.1;           // faster transitions
+            const PATTERN_SCALE = 2;            // make patterns fill the screen
+
+            let scene, camera, renderer, particles;
+            let currentPositions = [];
+            let targetPositions = [];
+            let targetPattern = 'saturn';
+            let particleColor = new THREE.Color('#c0b0ff');
+            let targetColor = new THREE.Color('#c0b0ff');
+            
+            let handDetected = false;
+            let currentFingerCount = 0;
+            let fingerCountHistory = [];
+            const HISTORY_SIZE = 5;
+
+            const gestureSpan = document.getElementById('gesture-text');
+            const fullscreenBtn = document.getElementById('fullscreenBtn');
+            const webcamVideo = document.getElementById('webcam-bg');
+
+            const themeColors = [
+                0xffaa88, 0xaaccff, 0xffddaa, 0xffaaff, 0xffaaaa, 0xcc88ff
+            ];
+
+            function initScene() {
+                scene = new THREE.Scene();
+                // Adjust camera to see larger patterns
+                camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+                camera.position.set(3, 1.8, 7.5);  // pulled back
+                camera.lookAt(0, 0, 0);
+
+                renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                renderer.setClearColor(0x000000, 0);
+                document.body.appendChild(renderer.domElement);
+
+                const ambient = new THREE.AmbientLight(0x404060);
+                scene.add(ambient);
+                const light = new THREE.PointLight(0xffffff, 0.5);
+                light.position.set(2, 3, 4);
+                scene.add(light);
+
+                // Soft glow texture
+                const canvas = document.createElement('canvas');
+                canvas.width = 32;
+                canvas.height = 32;
+                const ctx = canvas.getContext('2d');
+                const gradient = ctx.createRadialGradient(16,16,0,16,16,14);
+                gradient.addColorStop(0, 'rgba(255,255,255,1)');
+                gradient.addColorStop(0.5, 'rgba(220,200,255,0.8)');
+                gradient.addColorStop(1, 'rgba(180,160,255,0)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0,0,32,32);
+                const texture = new THREE.CanvasTexture(canvas);
+
+                const material = new THREE.PointsMaterial({
+                    color: particleColor,
+                    size: BASE_SIZE,
+                    map: texture,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                    transparent: true,
+                    sizeAttenuation: true
+                });
+
+                const geometry = new THREE.BufferGeometry();
+                const positions = new Float32Array(PARTICLE_COUNT * 3);
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+                particles = new THREE.Points(geometry, material);
+                scene.add(particles);
+
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    currentPositions.push(new THREE.Vector3());
+                    targetPositions.push(new THREE.Vector3());
+                }
+
+                generatePattern('saturn', true);
+            }
+
+            // --- Improved smile pattern: very visible smile ---
+            function generateSmilePositions() {
+                const positions = [];
+                const count = PARTICLE_COUNT;
+                
+                // Allocate: 60% head, 20% eyes, 20% smile
+                const headCount = Math.floor(count * 0.6);
+                const eyeCount = Math.floor(count * 0.15);
+                const smileCount = count - headCount - eyeCount;
+
+                // Head sphere (slightly stretched)
+                for (let i = 0; i < headCount; i++) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const r = 1.6;
+                    positions.push(new THREE.Vector3(
+                        r * Math.sin(phi) * Math.cos(theta),
+                        r * Math.sin(phi) * Math.sin(theta) * 0.9,
+                        r * Math.cos(phi)
+                    ));
+                }
+
+                // Left eye (small sphere)
+                for (let i = 0; i < eyeCount/2; i++) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const r = 0.3;
+                    positions.push(new THREE.Vector3(
+                        -0.8 + r * Math.sin(phi) * Math.cos(theta),
+                        0.6 + r * Math.sin(phi) * Math.sin(theta),
+                        1.2 + r * Math.cos(phi)
+                    ));
+                }
+                // Right eye
+                for (let i = 0; i < eyeCount/2; i++) {
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const r = 0.3;
+                    positions.push(new THREE.Vector3(
+                        0.8 + r * Math.sin(phi) * Math.cos(theta),
+                        0.6 + r * Math.sin(phi) * Math.sin(theta),
+                        1.2 + r * Math.cos(phi)
+                    ));
+                }
+
+                // Smile: thick arc from -0.8 to 0.8 in x, y around -0.2 to 0.2
+                for (let i = 0; i < smileCount; i++) {
+                    // Parametric along smile, with thickness
+                    const t = Math.random() * Math.PI;  // 0 to PI
+                    const baseX = Math.cos(t) * 1.2;    // width
+                    const baseY = Math.sin(t) * 0.6 - 0.3; // height
+                    // Add random thickness
+                    const x = baseX + (Math.random() - 0.5) * 0.4;
+                    const y = baseY + (Math.random() - 0.5) * 0.4;
+                    const z = 1.3 + (Math.random() - 0.5) * 0.4;
+                    positions.push(new THREE.Vector3(x, y, z));
+                }
+
+                return positions;
+            }
+
+            // --- Pattern generators (all scaled by PATTERN_SCALE) ---
+            function generatePatternPositions(pattern) {
+                let positions = [];
+
+                if (pattern === 'saturn') {
+                    const sphereCount = Math.floor(PARTICLE_COUNT * 0.6);
+                    const ringCount = PARTICLE_COUNT - sphereCount;
+                    for (let i = 0; i < sphereCount; i++) {
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.acos(2 * Math.random() - 1);
+                        const r = 1.2;
+                        positions.push(new THREE.Vector3(
+                            r * Math.sin(phi) * Math.cos(theta),
+                            r * Math.sin(phi) * Math.sin(theta),
+                            r * Math.cos(phi)
+                        ));
+                    }
+                    for (let i = 0; i < ringCount; i++) {
+                        const R = 2.0, rTube = 0.3;
+                        const u = Math.random() * Math.PI * 2;
+                        const v = Math.random() * Math.PI * 2;
+                        positions.push(new THREE.Vector3(
+                            (R + rTube * Math.cos(v)) * Math.cos(u),
+                            (R + rTube * Math.cos(v)) * Math.sin(u) * 0.3,
+                            rTube * Math.sin(v)
+                        ));
+                    }
+                }
+                else if (pattern === 'cat') {
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        const r = 1.2;
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.acos(2 * Math.random() - 1);
+                        let x = r * Math.sin(phi) * Math.cos(theta);
+                        let y = r * Math.sin(phi) * Math.sin(theta) * 0.9 + 0.2;
+                        let z = r * Math.cos(phi);
+                        if (i % 7 === 0) { x += 0.5; y += 0.4; z += 0.2; }
+                        if (i % 11 === 0) { x -= 0.5; y += 0.4; z += 0.2; }
+                        positions.push(new THREE.Vector3(x, y, z));
+                    }
+                }
+                else if (pattern === 'hey') {
+                    const letters = [
+                        [1,0,0,0,0,0,1, 1,0,0,0,0,0,1, 1,0,0,0,0,0,1, 1,1,1,1,1,1,1, 1,0,0,0,0,0,1, 1,0,0,0,0,0,1, 1,0,0,0,0,0,1],
+                        [1,1,1,1,1,1,1, 1,0,0,0,0,0,0, 1,0,0,0,0,0,0, 1,1,1,1,1,1,1, 1,0,0,0,0,0,0, 1,0,0,0,0,0,0, 1,1,1,1,1,1,1],
+                        [1,0,0,0,0,0,1, 0,1,0,0,0,1,0, 0,0,1,0,1,0,0, 0,0,0,1,0,0,0, 0,0,0,1,0,0,0, 0,0,0,1,0,0,0, 0,0,0,1,0,0,0]
+                    ];
+                    const cols = 7, rows = 7;
+                    const particlesPerLetter = Math.floor(PARTICLE_COUNT / 3);
+                    for (let l = 0; l < 3; l++) {
+                        for (let i = 0; i < particlesPerLetter; i++) {
+                            const r = Math.floor(Math.random() * rows);
+                            const c = Math.floor(Math.random() * cols);
+                            const idx = r * cols + c;
+                            if (letters[l][idx]) {
+                                const x = (c - 3) * 0.35 + (l - 1) * 2.5;
+                                const y = (3 - r) * 0.4;
+                                const z = (Math.random() - 0.5) * 0.3;
+                                positions.push(new THREE.Vector3(x, y, z));
+                            } else {
+                                positions.push(new THREE.Vector3(
+                                    (Math.random() - 0.5) * 6,
+                                    (Math.random() - 0.5) * 6,
+                                    (Math.random() - 0.5) * 6
+                                ));
+                            }
+                        }
+                    }
+                }
+                else if (pattern === 'smile') {
+                    // Use the dedicated smile generator
+                    positions = generateSmilePositions();
+                }
+                else if (pattern === 'heart') {
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        const t = Math.random() * Math.PI * 2;
+                        const x = 16 * Math.pow(Math.sin(t), 3);
+                        const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                        const scale = 0.08;
+                        positions.push(new THREE.Vector3(
+                            x * scale,
+                            y * scale,
+                            (Math.random() - 0.5) * 0.4
+                        ));
+                    }
+                }
+                else { // random nebula
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        const r = Math.random() * 3.5;
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.acos(2 * Math.random() - 1);
+                        positions.push(new THREE.Vector3(
+                            r * Math.sin(phi) * Math.cos(theta),
+                            r * Math.sin(phi) * Math.sin(theta) * 0.5,
+                            r * Math.cos(phi) * 0.8
+                        ));
+                    }
+                }
+
+                // Apply global scale
+                positions.forEach(p => p.multiplyScalar(PATTERN_SCALE));
+
+                // Fill if short
+                while (positions.length < PARTICLE_COUNT) {
+                    positions.push(new THREE.Vector3(
+                        (Math.random() - 0.5) * 4 * PATTERN_SCALE,
+                        (Math.random() - 0.5) * 4 * PATTERN_SCALE,
+                        (Math.random() - 0.5) * 4 * PATTERN_SCALE
+                    ));
+                }
+                // Trim if excess
+                if (positions.length > PARTICLE_COUNT) positions.length = PARTICLE_COUNT;
+                return positions;
+            }
+
+            function generatePattern(pattern, immediate = false) {
+                targetPattern = pattern;
+                const newTargets = generatePatternPositions(pattern);
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    targetPositions[i].copy(newTargets[i]);
+                }
+                if (immediate) {
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        currentPositions[i].copy(targetPositions[i]);
+                    }
+                }
+            }
+
+            function updateParticlePositions() {
+                const posAttr = particles.geometry.attributes.position;
+                const array = posAttr.array;
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    currentPositions[i].lerp(targetPositions[i], MORPH_SPEED);
+                    array[i*3] = currentPositions[i].x;
+                    array[i*3+1] = currentPositions[i].y;
+                    array[i*3+2] = currentPositions[i].z;
+                }
+                posAttr.needsUpdate = true;
+            }
+
+            function countExtendedFingers(landmarks) {
+                const fingerTips = [4, 8, 12, 16, 20];
+                const fingerPips = [3, 6, 10, 14, 18];
+                let count = 0;
+                if (landmarks[4].x > landmarks[3].x) count++;
+                for (let i = 1; i < 5; i++) {
+                    if (landmarks[fingerTips[i]].y < landmarks[fingerPips[i]].y) count++;
+                }
+                return count;
+            }
+
+            const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onHandResults);
+
+            function onHandResults(results) {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    handDetected = true;
+                    const landmarks = results.multiHandLandmarks[0];
+                    const fingers = countExtendedFingers(landmarks);
+                    
+                    fingerCountHistory.push(fingers);
+                    if (fingerCountHistory.length > HISTORY_SIZE) fingerCountHistory.shift();
+                    const counts = {};
+                    let maxCount = 0, mode = currentFingerCount;
+                    fingerCountHistory.forEach(f => counts[f] = (counts[f] || 0) + 1);
+                    for (let num in counts) {
+                        if (counts[num] > maxCount) { maxCount = counts[num]; mode = parseInt(num); }
+                    }
+                    currentFingerCount = mode;
+
+                    let newPattern;
+                    if (currentFingerCount === 0) newPattern = 'saturn';
+                    else if (currentFingerCount === 1) newPattern = 'cat';
+                    else if (currentFingerCount === 2) newPattern = 'hey';
+                    else if (currentFingerCount === 3) newPattern = 'smile';
+                    else if (currentFingerCount === 4) newPattern = 'heart';
+                    else newPattern = 'random';
+
+                    if (newPattern !== targetPattern) {
+                        generatePattern(newPattern);
+                    }
+
+                    targetColor.setHex(themeColors[currentFingerCount % themeColors.length]);
+                    
+                    gestureSpan.innerText = `${currentFingerCount} finger${currentFingerCount !== 1 ? 's' : ''}`;
+                } else {
+                    handDetected = false;
+                    gestureSpan.innerText = 'no hand';
+                }
+            }
+
+            async function setupCamera() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    webcamVideo.srcObject = stream;
+                    await webcamVideo.play();
+
+                    const mpCamera = new Camera(webcamVideo, {
+                        onFrame: async () => { await hands.send({ image: webcamVideo }); },
+                        width: 480, height: 360, fps: 20
+                    });
+                    mpCamera.start();
+                } catch (e) {
+                    gestureSpan.innerText = 'camera unavailable';
+                }
+            }
+            setupCamera();
+
+            fullscreenBtn.addEventListener('click', () => {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen();
+                    fullscreenBtn.innerHTML = '<i class="fas fa-compress"></i>';
+                } else {
+                    document.exitFullscreen();
+                    fullscreenBtn.innerHTML = '<i class="fas fa-expand"></i>';
+                }
+            });
+            document.addEventListener('fullscreenchange', () => {
+                fullscreenBtn.innerHTML = document.fullscreenElement ? 
+                    '<i class="fas fa-compress"></i>' : '<i class="fas fa-expand"></i>';
+            });
+
+            function animate() {
+                requestAnimationFrame(animate);
+
+                particleColor.lerp(targetColor, 0.05);
+                particles.material.color.set(particleColor);
+
+                particles.rotation.y += 0.0012;  // slightly faster rotation
+                particles.rotation.x += 0.0004;
+
+                updateParticlePositions();
+                renderer.render(scene, camera);
+            }
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            initScene();
+            animate();
+        })();
+    </script>
+</body>
+</html>
